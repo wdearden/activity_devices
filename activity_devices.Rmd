@@ -1,0 +1,138 @@
+---
+title: "Activity Devices Machine Learning Model"
+author: "William Dearden"
+date: "October 9, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Overview
+
+This document is the writeup of my final project for the Coursera Practical Machine Learning course. In this project, I use data from accelerometers placed on six subjects to build a model which predicts the type of barbell lift a subject is doing. More information on wearable devices is available from [this website](http://groupware.les.inf.puc-rio.br/har#ixzz3xsbS5bVX).
+
+## Setup
+
+I use basic packages for loading and cleaning data and fitting machine learning models.
+
+```{r packages, message = FALSE, warning = FALSE}
+library(readr)
+library(dplyr)
+library(purrr)
+library(randomForest)
+library(caret)
+library(corrplot)
+library(xtable)
+library(knitr)
+library(kableExtra)
+library(resamplr)
+library(modelr)
+
+data_raw <- read_csv("Input/pml-training.csv")
+```
+
+This dataset contains accelerometer data with names such as `accel_belt_z` and `pitch_arm`. In addition there are identifiers such as `user_name` which contains the name of one of the six subjects.
+
+In addition, this dataset has a few issues to be cleaned before we can use a random forest model:
+
+1. There are columns which have mostly missing data.
+2. There are timestamp identifiers which we do not need.
+3. There are predictors of type `character` and type `integer`, which `randomForest` cannot handle.
+
+```{r cleaning}
+na_pct <- map(data_raw, ~ mean(is.na(.x)))
+
+data <- data_raw %>%
+  `[`(, na_pct < 1e-5) %>%
+  select(-X1, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp,
+         -num_window, -new_window) %>%
+  mutate_if(is.character, as.factor) %>%
+  mutate_if(is.integer, as.double)
+```
+
+## Exploratory data analysis
+
+After removing columns with missing data, we are left with `r ncol(data)` columns.
+
+So, we create a correlation matrix of all the variables:
+
+```{r corrplot, fig.width=10, fig.height = 10}
+correlations <- data %>% 
+  select_if(is.numeric) %>% 
+  cor()
+
+corrplot(correlations, order = "FPC", method = "color", type = "lower", 
+         tl.cex = 0.6, tl.col = rgb(0, 0, 0))
+```
+
+As we can see, there are a relatively small number of columns which are highly correlated. Therefore, we will first try estimating our random forest model with all of the variables included.
+
+## Fitting the model
+
+First, we try a simple random forest model which predicts the activity type (`classe`) as a function of all other variables.
+
+```{r fit, cache = TRUE, dependson = "cleaning"}
+split <- createDataPartition(data$classe, p = 0.7, list = FALSE)
+train <- data[split[, 1], ]
+test <- data[-split[, 1], ]
+
+rf_fit <- randomForest(classe ~ ., data = train, na.action = na.omit)
+```
+Then we use the fitted model to predict exercise type on the testing data and get a confusion matrix.
+
+```{r confusion}
+predictions <- predict(rf_fit, newdata = test)
+results_table <- table(test$classe, predictions)
+kable(results_table) %>%
+  add_footnote("Row is actual class. Column is predicted class.")
+```
+
+As we can see from the confusion matrix above, the fit on testing data is extremely good. The model predicts excercise type with `r scales::percent(mean(test$classe == predictions))` accuracy.
+
+## Discussion
+
+For the assignments' purpose, we have a nearly perfect model and the model above received a 20/20 on the quiz. However, I am worried about the generalizability of this model. Specifically, the testing data comes from points which are adjacent in time to the training data. As an experiment, I split the data up by subject and, for each user, fit a model which uses data only from the other subjects. This experiments tests the generalizability of the model.
+
+```{r general_fit, cache = TRUE, dependson = "cleaning"}
+user_ids <- data %>%
+  select(user_name) %>%
+  mutate(id = row_number()) %>%
+  split(.$user_name) %>%
+  map(~ .x$id)
+
+user_split <- crossv_df(data, test = user_ids)
+
+rf_fits <-
+  map(
+    user_split$train,
+    ~ .x %>%
+      as.data.frame() %>%
+      randomForest(classe ~ ., data = ., na.action = na.omit)
+  )
+```
+
+After fitting the models, we output the accuracy of the model by user.
+
+```{r}
+user_split$test <- map(user_split$test, as.data.frame)
+
+data_preds <-
+  map2_df(
+    user_split$test,
+    rf_fits, 
+    add_predictions
+  )
+
+accuracy <- data_preds %>%
+  group_by(user_name) %>%
+  summarize(Accuracy = mean(classe == pred)) %>%
+  mutate(Accuracy = scales::percent(Accuracy)) %>%
+  dplyr::rename(Subject = user_name)
+ 
+kable(accuracy)
+
+```
+
+The accuracy of the model almost completely goes away when we apply the model to a new user. Therefore, while the model used for this project has good fit locally, it is not generalizable. One conclusion is that the model needs to be calibrated to each user. Therefore, if this model was ever used in a commercial product, each user would need to calibrate the device to their personal exercise style.

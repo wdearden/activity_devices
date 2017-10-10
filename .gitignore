@@ -1,0 +1,8 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+Input/*
+exploratory_script.R
+activity_devices_cache
+activity_devices_files
